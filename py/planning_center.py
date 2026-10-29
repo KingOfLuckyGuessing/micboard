@@ -14,6 +14,7 @@ from requests_oauthlib import OAuth2Session
 from dateutil import parser as date_parser
 
 import config
+import pco_debug
 
 # PCO Rate Limiting: 70 requests per 20-second window
 PCO_RATE_LIMIT = 70
@@ -138,15 +139,27 @@ def _rate_limit_request() -> None:
         _request_count += 1
 
 def _make_pco_request(session: requests.Session, url: str, params: Optional[Dict] = None, max_retries: int = 3) -> Optional[requests.Response]:
-    """Make a rate-limited PCO API request with retry logic."""
-    # Log the API request
-    log_api_request('GET', url, params, session.headers)
-    
+    """Make a rate-limited PCO API request with retry logic.
+
+    All request/response logging goes through ``pco_debug`` (see that
+    module for how to turn full-body logging on). The response is
+    logged *before* ``raise_for_status()`` so an error body is captured
+    even when the call then raises and is retried/returned as None.
+    """
+    import time as _time
+
+    pco_debug.log_pco_request('GET', url, params, session.headers,
+                              caller='planning_center._make_pco_request')
+
     for attempt in range(max_retries):
         try:
             _rate_limit_request()
+            _started = _time.monotonic()
             response = session.get(url, params=params, timeout=10)
-            
+            _elapsed_ms = (_time.monotonic() - _started) * 1000
+            pco_debug.log_pco_response(response, caller='planning_center._make_pco_request',
+                                       elapsed_ms=_elapsed_ms)
+
             if response.status_code == 429:
                 # Rate limited - check for Retry-After header
                 retry_after = response.headers.get('Retry-After')
@@ -160,26 +173,19 @@ def _make_pco_request(session: requests.Session, url: str, params: Optional[Dict
                     logging.warning(f"PCO rate limited, waiting {wait_time} seconds (exponential backoff)")
                     time.sleep(wait_time)
                 continue
-            
+
             # Handle 404 specifically - it's often expected (e.g., no assignments yet)
             if response.status_code == 404:
-                log_api_response(404, {'message': 'Resource not found (this is normal for plans without assignments)'})
                 return response
-            
+
             response.raise_for_status()
-            
-            # Log successful response
-            try:
-                response_data = response.json()
-                log_api_response(response.status_code, response_data)
-            except:
-                log_api_response(response.status_code)
-            
+
             return response
-            
+
         except requests.exceptions.Timeout as e:
             if attempt == max_retries - 1:
-                log_api_response(0, error=f"Timeout: {str(e)}")
+                pco_debug.log_pco_response(None, caller='planning_center._make_pco_request',
+                                           error=f"Timeout: {str(e)}")
                 logging.error(f"PCO API request timed out after {max_retries} attempts: {e}")
                 return None
             else:
@@ -188,14 +194,15 @@ def _make_pco_request(session: requests.Session, url: str, params: Optional[Dict
                 time.sleep(wait_time)
         except requests.exceptions.RequestException as e:
             if attempt == max_retries - 1:
-                log_api_response(0, error=str(e))
+                pco_debug.log_pco_response(None, caller='planning_center._make_pco_request',
+                                           error=str(e))
                 logging.error(f"PCO API request failed after {max_retries} attempts: {e}")
                 return None
             else:
                 wait_time = (2 ** attempt) * 2  # 2, 4, 8 seconds
                 logging.warning(f"PCO API request failed, retrying in {wait_time} seconds: {e}")
                 time.sleep(wait_time)
-    
+
     return None
 
 def get_pco_session() -> Optional[requests.Session]:

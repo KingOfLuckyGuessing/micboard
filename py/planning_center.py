@@ -240,12 +240,17 @@ def get_service_types() -> List[Dict[str, Any]]:
         
         service_types = []
         for item in data.get('data', []):
+            # Use .get() throughout: one service type missing an
+            # attribute (e.g. 'frequency' is absent for some types)
+            # used to raise KeyError and discard the whole list,
+            # returning [] even though PCO returned all the types.
+            attributes = item.get('attributes') or {}
             service_types.append({
-                'id': item['id'],
-                'name': item['attributes']['name'],
-                'frequency': item['attributes']['frequency']
+                'id': item.get('id'),
+                'name': attributes.get('name') or f"Service {item.get('id')}",
+                'frequency': attributes.get('frequency') or ''
             })
-        
+
         return service_types
     except Exception as e:
         logging.error(f"Error fetching PCO service types: {e}")

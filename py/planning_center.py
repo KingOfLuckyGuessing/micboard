@@ -226,6 +226,45 @@ def get_pco_session() -> Optional[requests.Session]:
 
 
 
+def _fetch_all_pco_items(session, url):
+    """Fetch every page of a PCO list endpoint.
+
+    PCO defaults to 25 items per page and the old code only ever read
+    the first page, so anything past item 25 (a team, a position, a
+    service type) was silently invisible. Follow ``links.next`` when
+    present, otherwise walk ``offset`` in 100-item pages until a short
+    page. A failed/404 page stops the walk and returns what was
+    collected so far.
+    """
+    items = []
+    next_url = url
+    params = {'per_page': 100, 'offset': 0}
+    seen_urls = set()
+    while next_url and next_url not in seen_urls:
+        seen_urls.add(next_url)
+        response = _make_pco_request(session, next_url, params=params)
+        if not response:
+            break
+        try:
+            data = response.json()
+        except Exception:
+            break
+        if not isinstance(data, dict):
+            break
+        page = data.get('data') or []
+        items.extend(page)
+        links = data.get('links') or {}
+        if links.get('next'):
+            next_url = links['next']
+            params = None  # the next URL already carries its paging
+            continue
+        if len(page) < 100:
+            break
+        params = {'per_page': 100, 'offset': len(items)}
+        next_url = url
+    return items
+
+
 def get_service_types() -> List[Dict[str, Any]]:
     """Fetch all service types from PCO."""
     session = get_pco_session()
@@ -233,13 +272,8 @@ def get_service_types() -> List[Dict[str, Any]]:
         return []
     
     try:
-        response = _make_pco_request(session, f"{PCO_API_BASE}/service_types")
-        if not response:
-            return []
-        data = response.json()
-        
         service_types = []
-        for item in data.get('data', []):
+        for item in _fetch_all_pco_items(session, f"{PCO_API_BASE}/service_types"):
             # Use .get() throughout: one service type missing an
             # attribute (e.g. 'frequency' is absent for some types)
             # used to raise KeyError and discard the whole list,
@@ -332,16 +366,14 @@ def get_teams(service_type_ids: List[str]) -> List[Dict[str, Any]]:
     for service_type_id in service_type_ids:
         try:
             url = f"{PCO_API_BASE}/service_types/{service_type_id}/teams"
-            response = _make_pco_request(session, url)
-            if not response:
-                continue
-            data = response.json()
-            
-            for item in data.get('data', []):
-                team_name = item['attributes']['name']
+            for item in _fetch_all_pco_items(session, url):
+                attributes = item.get('attributes') or {}
+                team_name = attributes.get('name')
+                if not team_name:
+                    continue
                 if team_name not in teams_by_name:
                     teams_by_name[team_name] = {
-                        'id': item['id'],
+                        'id': item.get('id'),
                         'name': team_name,
                         'service_type_id': service_type_id
                     }
@@ -359,16 +391,14 @@ def get_teams_for_service_type(service_type_id: str) -> List[Dict[str, Any]]:
     
     try:
         url = f"{PCO_API_BASE}/service_types/{service_type_id}/teams"
-        response = _make_pco_request(session, url)
-        if not response:
-            return []
-        data = response.json()
-        
         teams = []
-        for item in data.get('data', []):
+        for item in _fetch_all_pco_items(session, url):
+            attributes = item.get('attributes') or {}
+            if not attributes.get('name'):
+                continue
             teams.append({
-                'id': item['id'],
-                'name': item['attributes']['name'],
+                'id': item.get('id'),
+                'name': attributes.get('name'),
                 'service_type_id': service_type_id
             })
         
@@ -390,36 +420,42 @@ def get_positions(service_type_ids: List[str], team_name: str) -> List[Dict[str,
     for service_type_id in service_type_ids:
         try:
             # First, get all teams for this service type to find the team ID
+            # (all pages, not just the first 25)
             teams_url = f"{PCO_API_BASE}/service_types/{service_type_id}/teams"
-            teams_response = _make_pco_request(session, teams_url)
-            if not teams_response:
-                continue
-            teams_data = teams_response.json()
-            
-            # Find the team ID for the requested team name
+            teams_items = _fetch_all_pco_items(session, teams_url)
+
+            # Find the team ID for the requested team name: exact match
+            # first, then a case/whitespace-insensitive match, so a query
+            # like 'CAFE' still finds a PCO team actually named 'Cafe'.
             target_team_id = None
-            for team_item in teams_data.get('data', []):
-                if team_item['attributes']['name'] == team_name:
-                    target_team_id = team_item['id']
+            wanted = (team_name or '').strip().lower()
+            for team_item in teams_items:
+                attributes = team_item.get('attributes') or {}
+                if attributes.get('name') == team_name:
+                    target_team_id = team_item.get('id')
                     break
-            
             if not target_team_id:
+                for team_item in teams_items:
+                    attributes = team_item.get('attributes') or {}
+                    if (attributes.get('name') or '').strip().lower() == wanted and wanted:
+                        target_team_id = team_item.get('id')
+                        break
+
+            if not target_team_id:
+                logging.info(f"No team named '{team_name}' found in service type {service_type_id} "
+                             f"({len(teams_items)} teams checked)")
                 continue
-            
-            # Now get positions for this specific team
+
+            # Now get positions for this specific team (all pages)
             positions_url = f"{PCO_API_BASE}/service_types/{service_type_id}/teams/{target_team_id}/team_positions"
-            response = _make_pco_request(session, positions_url)
-            if not response:
-                continue
-            positions_data = response.json()
-            
-            # Add positions for this team
-            for item in positions_data.get('data', []):
-                position_name = item['attributes']['name']
-                
+            for item in _fetch_all_pco_items(session, positions_url):
+                attributes = item.get('attributes') or {}
+                position_name = attributes.get('name')
+                if not position_name:
+                    continue
                 if position_name not in positions_by_name:
                     positions_by_name[position_name] = {
-                        'id': item['id'],
+                        'id': item.get('id'),
                         'name': position_name,
                         'team_id': target_team_id,
                         'service_type_id': service_type_id
@@ -441,16 +477,14 @@ def get_positions_for_team_in_service_type(service_type_id: str, team_id: str) -
     
     try:
         positions_url = f"{PCO_API_BASE}/service_types/{service_type_id}/teams/{team_id}/team_positions"
-        response = _make_pco_request(session, positions_url)
-        if not response:
-            return []
-        positions_data = response.json()
-        
         positions = []
-        for item in positions_data.get('data', []):
+        for item in _fetch_all_pco_items(session, positions_url):
+            attributes = item.get('attributes') or {}
+            if not attributes.get('name'):
+                continue
             positions.append({
-                'id': item['id'],
-                'name': item['attributes']['name'],
+                'id': item.get('id'),
+                'name': attributes.get('name'),
                 'team_id': team_id,
                 'service_type_id': service_type_id
             })

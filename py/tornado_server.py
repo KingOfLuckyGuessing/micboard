@@ -14,6 +14,7 @@ import shure
 import config
 import discover
 import offline
+import pco_debug
 import planning_center
 import pco_endpoints
 import google_drive
@@ -534,7 +535,7 @@ class PCOTestParametersHandler(web.RequestHandler):
                 for param_name, params in test_params.items():
                     try:
                         url = f"{planning_center.PCO_API_BASE}/service_types/{service_type_id}/plans"
-                        response = session.get(url, params=params)
+                        response = pco_debug.pco_get(session, url, params=params, caller='PCOTestParametersHandler')
                         response.raise_for_status()
                         data = response.json()
                         
@@ -667,7 +668,7 @@ class PCOTestPlansHandler(web.RequestHandler):
                 'order': 'sort_date',
                 'per_page': 10
             }
-            response = session.get(url, params=params)
+            response = pco_debug.pco_get(session, url, params=params, caller='PCOTestPlansHandler')
             response.raise_for_status()
             data = response.json()
             
@@ -684,7 +685,7 @@ class PCOTestPlansHandler(web.RequestHandler):
                 
                 # Get first service time
                 times_url = f"{planning_center.PCO_API_BASE}/service_types/{service_type_id}/plans/{plan_id}/plan_times"
-                times_response = session.get(times_url)
+                times_response = pco_debug.pco_get(session, times_url, caller='PCOTestPlansHandler.plan_times')
                 times_response.raise_for_status()
                 times_data = times_response.json()
                 
@@ -1001,7 +1002,7 @@ class PCODebugHandler(web.RequestHandler):
             # First, get ALL service types to find NORTH GEORGIA REVIVAL
             session = planning_center.get_pco_session()
             if session:
-                all_service_types_response = session.get(f"{planning_center.PCO_API_BASE}/service_types")
+                all_service_types_response = pco_debug.pco_get(session, f"{planning_center.PCO_API_BASE}/service_types", caller='PCODebugHandler')
                 all_service_types_response.raise_for_status()
                 all_service_types_data = all_service_types_response.json()
                 
@@ -1034,7 +1035,7 @@ class PCODebugHandler(web.RequestHandler):
                     if session:
                         url = f"{planning_center.PCO_API_BASE}/service_types/{service_type_id}/plans/{plan['id']}/team_members"
                         params = {'include': 'person,team_position'}
-                        response = session.get(url, params=params)
+                        response = pco_debug.pco_get(session, url, params=params, caller='PCODebugHandler.team_members')
                         response.raise_for_status()
                         data = response.json()
                         
@@ -1049,7 +1050,7 @@ class PCODebugHandler(web.RequestHandler):
                             if team_ref:
                                 team_id = team_ref['id']
                                 teams_url = f"{planning_center.PCO_API_BASE}/teams/{team_id}"
-                                team_response = session.get(teams_url)
+                                team_response = pco_debug.pco_get(session, teams_url, caller='PCODebugHandler.team')
                                 team_response.raise_for_status()
                                 team_data = team_response.json()
                                 team_name = team_data['data']['attributes']['name']

@@ -14,6 +14,7 @@ import requests
 from requests_oauthlib import OAuth2Session
 
 import config
+import pco_debug
 
 # PCO Rate Limiting
 PCO_RATE_LIMIT = 70
@@ -71,10 +72,15 @@ def _rate_limit_request() -> None:
 
 def _make_pco_request(session: requests.Session, url: str, params: Optional[Dict] = None, max_retries: int = 3) -> Optional[requests.Response]:
     """Make a rate-limited PCO API request with retry logic."""
+    pco_debug.log_pco_request('GET', url, params, session.headers,
+                              caller='planning_center_minimal._make_pco_request')
     for attempt in range(max_retries):
         try:
             _rate_limit_request()
+            _started = time.monotonic()
             response = session.get(url, params=params, timeout=10)
+            pco_debug.log_pco_response(response, caller='planning_center_minimal._make_pco_request',
+                                       elapsed_ms=(time.monotonic() - _started) * 1000)
             
             if response.status_code == 429:
                 retry_after = response.headers.get('Retry-After')

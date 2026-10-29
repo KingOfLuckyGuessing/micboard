@@ -11,6 +11,8 @@ from typing import Dict, List, Optional, Any
 import requests
 from dateutil import parser as date_parser
 
+import pco_debug
+
 # PCO API Configuration
 PCO_API_BASE = 'https://api.planningcenteronline.com/services/v2'
 
@@ -59,9 +61,16 @@ class PCOScheduler:
         })
     
     def _make_request(self, url: str, params: Dict = None) -> Optional[requests.Response]:
-        """Make API request with error handling"""
+        """Make API request with error handling.
+
+        The request/response (including the body, when PCO_DEBUG is on)
+        is logged by ``pco_debug.pco_get``. This wrapper itself never
+        changes the response: 404 still returns None here, and other
+        errors still return None after logging, exactly as before.
+        """
         try:
-            response = self.session.get(url, params=params, timeout=10)
+            response = pco_debug.pco_get(self.session, url, params=params, timeout=10,
+                                         caller='pco_scheduler._make_request')
             if response.status_code == 404:
                 logging.info(f"Resource not found (404): {url}")
                 return None

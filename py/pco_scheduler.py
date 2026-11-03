@@ -12,6 +12,7 @@ import requests
 from dateutil import parser as date_parser
 
 import pco_debug
+import pco_photos
 
 # PCO API Configuration
 PCO_API_BASE = 'https://api.planningcenteronline.com/services/v2'
@@ -161,14 +162,52 @@ class PCOScheduler:
                 
                 # Map assignments to slots
                 plan_obj['slot_assignments'] = self._map_assignments_to_slots(assignments, service_type_id)
-                
+                # Photo link per slot, for the same mapped people only.
+                # slot_assignments stays a plain {slot: name} mapping so
+                # existing consumers are unaffected; slot_photos is additive.
+                _by_name = {}
+                for _a in assignments:
+                    if _a.get('person_name') and _a.get('photo_url'):
+                        _by_name.setdefault(_a['person_name'], _a['photo_url'])
+                plan_obj['slot_photos'] = {
+                    slot: _by_name[name]
+                    for slot, name in plan_obj['slot_assignments'].items()
+                    if name in _by_name
+                }
+
                 all_plans.append(plan_obj)
                 logging.info(f"Added plan {plan_id} for {plan_obj['dates']} (live at {live_time})")
         
         # Sort all plans by live time
         all_plans.sort(key=lambda x: date_parser.parse(x['live_time']))
-        
+
+        # Download profile pictures for the people actually mapped to a
+        # slot (the "selected" users). This runs in a background thread
+        # so it never blocks the caller -- see pco_photos.
+        self._trigger_photo_downloads(all_plans)
+
         return all_plans
+
+    def _trigger_photo_downloads(self, plans):
+        """Download photos for slot-mapped people in the given plans."""
+        try:
+            import config
+            backgrounds_dir = config.get_gif_dir()
+        except Exception as e:
+            logging.error(f"Cannot resolve backgrounds dir for photo downloads: {e}")
+            return
+        mapped = []
+        seen_names = set()
+        for plan in plans or []:
+            slot_names = set((plan.get('slot_assignments') or {}).values())
+            for assignment in plan.get('assignments') or []:
+                name = assignment.get('person_name')
+                if name in slot_names and name not in seen_names and assignment.get('photo_url'):
+                    seen_names.add(name)
+                    mapped.append(assignment)
+        if not mapped:
+            return
+        pco_photos.sync_assignment_photos_async(mapped, backgrounds_dir, session=self.session)
     
     def _fetch_plan_assignments(self, service_type_id: str, plan_id: str) -> List[Dict]:
         """Fetch assignments using team_members endpoint with includes to get individual position names"""
@@ -191,14 +230,20 @@ class PCOScheduler:
             included[key] = item
         
         for item in data.get('data', []):
-            # Get person name
+            # Get person name and profile-picture link. The PCO Services
+            # Person object in `included` carries photo_url (with
+            # photo_thumbnail_url as a fallback); that is the link the
+            # backgrounds download uses -- no separate People API call.
             person_ref = item.get('relationships', {}).get('person', {}).get('data', {})
             if person_ref and 'type' in person_ref and 'id' in person_ref:
                 person_key = f"{person_ref['type']}-{person_ref['id']}"
                 person_data = included.get(person_key, {})
-                person_name = person_data.get('attributes', {}).get('name', '') or person_data.get('attributes', {}).get('full_name', '')
+                person_attrs = person_data.get('attributes', {}) or {}
+                person_name = person_attrs.get('name', '') or person_attrs.get('full_name', '')
+                photo_url = person_attrs.get('photo_url') or person_attrs.get('photo_thumbnail_url') or ''
             else:
                 person_name = ''
+                photo_url = ''
 
             # Prefer PlanPerson.attributes.team_position_name when present
             position_name = item.get('attributes', {}).get('team_position_name', '') or ''
@@ -217,7 +262,8 @@ class PCOScheduler:
             assignments.append({
                 'person_name': person_name,
                 'position_name': position_name,
-                'status': status
+                'status': status,
+                'photo_url': photo_url
             })
         
         logging.info(f"Found {len(assignments)} team members for plan {plan_id}")
